@@ -52,45 +52,55 @@ class ProMP:
        (ICML'10) (pp. 599-606). https://hal.inria.fr/inria-00475214/document
     """
     def __init__(self, n_dims, n_weights_per_dim=10):
-        self.n_dims = n_dims
-        self.n_weights_per_dim = n_weights_per_dim
+    """ 初始化promp参数
 
-        self.n_weights = n_dims * n_weights_per_dim
+        参数：
+            n_dims:状态空间维度（如机器人末端坐标的x/y/z）
+            n_weights_per_dim:每个维度的基函数权重数量（默认10）“”“
+      
+        self.n_dims = n_dims    #状态维度
+        self.n_weights_per_dim = n_weights_per_dim    #每个维度的权重数
 
+        self.n_weights = n_dims * n_weights_per_dim    #总权重数（所有维度）
+        
+        #初始化权重的均值（0向量）和协方差（单位矩阵）
         self.weight_mean = np.zeros(self.n_weights)
         self.weight_cov = np.eye(self.n_weights)
 
+        #RBF基函数的中心（在【0，1】区间均匀分布）
         self.centers = np.linspace(0, 1, self.n_weights_per_dim)
 
     def weights(self, T, Y, lmbda=1e-12):
         """Obtain ProMP weights by linear regression.
-
+        从演示轨迹估计Promp权重（线性回归）
         Parameters
         ----------
         T : array-like, shape (n_steps,)
-            Time steps
+            Time steps     时间步
 
         Y : array-like, shape (n_steps, n_dims)
-            Demonstrated trajectory
+            Demonstrated trajectory     演示轨迹
 
         lmbda : float, optional (default: 1e-12)
-            Regularization coefficient
+            Regularization coefficient    正则化系数（防止过拟合）
 
         Returns
         -------
         weights : array, shape (n_steps * n_weights_per_dim)
-            ProMP weights
+            ProMP weights    估计的权重向量
         """
+        #计算RBF的激活量（转置后用于回归）
         activations = self._rbfs_nd_sequence(T).T
+        # 岭回归求解权重（(X^T X + λI)^-1 X^T Y）
         weights = np.linalg.pinv(
             activations.T.dot(activations)
             + lmbda * np.eye(activations.shape[1])
-        ).dot(activations.T).dot(Y.T.ravel())
+        ).dot(activations.T).dot(Y.T.ravel())    # Y展平为1D向量
         return weights
 
     def trajectory_from_weights(self, T, weights):
         """Generate trajectory from ProMP weights.
-
+            从权重生成轨迹
         Parameters
         ----------
         T : array-like, shape (n_steps,)
@@ -102,16 +112,20 @@ class ProMP:
         Returns
         -------
         Y : array, shape (n_steps, n_dims)
-            Trajectory
+            Trajectory    返回生成的轨迹
         """
+        #权重与RBF激活值相乘，在重塑为轨迹形状
         return self._rbfs_nd_sequence(T).T.dot(weights).reshape(
-            self.n_dims, len(T)).T
+            self.n_dims, len(T)).T    
 
     def condition_position(self, y_mean, y_cov=None, t=0, t_max=1.0):
         """Condition ProMP on a specific position.
-
+            通过指定位置约束Promp（贝叶斯更新）
         For details, see page 4 of [1]_
-
+            y_mean: 约束位置的均值（shape: [n_dims]）
+            y_cov: 约束位置的协方差（默认0，表示硬约束）
+            t: 约束对应的时间点
+            t_max: 轨迹总时长（用于归一化时间）
         Parameters
         ----------
         y_mean : array, shape (n_dims,)
@@ -130,7 +144,7 @@ class ProMP:
         Returns
         -------
         conditional_promp : ProMP
-            New conditional ProMP
+            New conditional ProMP    约束后新的promp实例
 
         References
         ----------
@@ -140,27 +154,29 @@ class ProMP:
            Neural Information Processing Systems, 26,
            https://papers.nips.cc/paper/2013/file/e53a0a2978c28872a4505bdb51db06dc-Paper.pdf
         """
+        #计算时间t处的RBF激活值（块对角矩阵形式，适配多维度）
         Psi_t = _nd_block_diagonal(
             self._rbfs_1d_point(t, t_max)[:, np.newaxis], self.n_dims)
         if y_cov is None:
             y_cov = 0.0
-
+        #贝叶斯更新公式（参考原论文的公式5和6）
         common_term = self.weight_cov.dot(Psi_t).dot(
             np.linalg.inv(y_cov + Psi_t.T.dot(self.weight_cov).dot(Psi_t)))
 
-        # Equation (5)
+        # Equation (5)    更新权重均值
         weight_mean = (
             self.weight_mean
             + common_term.dot(y_mean - Psi_t.T.dot(self.weight_mean)))
-        # Equation (6)
+        # Equation (6)    更新权重协方差
         weight_cov = (
             self.weight_cov - common_term.dot(Psi_t.T).dot(self.weight_cov))
 
+        #创建新的promp实例存储约束后的分布
         conditional_promp = ProMP(self.n_dims, self.n_weights_per_dim)
         conditional_promp.from_weight_distribution(weight_mean, weight_cov)
         return conditional_promp
 
-    def mean_trajectory(self, T):
+    def mean_trajectory(self, T):#计算均值的轨迹（从权重轨迹生成）
         """Get mean trajectory of ProMP.
 
         Parameters
@@ -175,7 +191,7 @@ class ProMP:
         """
         return self.trajectory_from_weights(T, self.weight_mean)
 
-    def cov_trajectory(self, T):
+    def cov_trajectory(self, T):#计算轨迹的协方差矩阵
         """Get trajectory covariance of ProMP.
 
         Parameters
@@ -191,7 +207,7 @@ class ProMP:
         activations = self._rbfs_nd_sequence(T)
         return activations.T.dot(self.weight_cov).dot(activations)
 
-    def var_trajectory(self, T):
+    def var_trajectory(self, T):#计算轨迹各点的方差（协方差矩阵的对角线）
         """Get trajectory variance of ProMP.
 
         Parameters
@@ -303,13 +319,18 @@ class ProMP:
 
     def imitate(self, Ts, Ys, n_iter=1000, min_delta=1e-5, verbose=0):
         r"""Learn ProMP from multiple demonstrations.
-
+            从多个演示轨迹学习promp（EM算法）
         For details, see Section 3.2 of [1]_. We use the parameters
         :math:`P = I` (identity matrix), :math:`\mu_0 = 0, k_0 = 0, \nu_0 = 0,
         \Sigma_0 = 0,\alpha_0 = 0,\beta_0 = 0`.
 
         Parameters
         ----------
+         Ts: 演示轨迹的时间步（shape: [n_demos, n_steps]）
+         Ys: 演示轨迹数据（shape: [n_demos, n_steps, n_dims]）
+         n_iter: 最大迭代次数
+         min_delta: 收敛阈值（均值变化小于该值时停止）
+         
         Ts : array, shape (n_demos, n_steps)
             Time steps of demonstrations
 
@@ -333,16 +354,18 @@ class ProMP:
            Learning (ICML'10) (pp. 599-606).
            https://hal.inria.fr/inria-00475214/document
         """
+        #初始化参数（gamma为平滑系数，variance为噪声方差）
         gamma = 0.7
 
         n_demos = len(Ts)
         self.variance = 1.0
 
+        #存储每个轨迹的权重均值和协方差
         means = np.zeros((n_demos, self.n_weights))
         covs = np.empty((n_demos, self.n_weights, self.n_weights))
 
         # Precompute constant terms in expectation-maximization algorithm
-
+        #预计算EM算法中的常量（如RBF激活值、轨迹平滑矩阵）
         # n_demos x n_steps*self.n_dims x n_steps*self.n_dims
         Hs = []
         for demo_idx in range(n_demos):
@@ -393,17 +416,18 @@ class ProMP:
             PhiHTHPhiTs.append(PhiHTHPhiT)
 
         n_samples = sum([Y.shape[0] for Y in Ys])
-
+        
+        #EM迭代
         for it in range(n_iter):
             weight_mean_old = self.weight_mean
-
+            #E步：估计每个演示的权重分布
             for demo_idx in range(n_demos):
                 means[demo_idx], covs[demo_idx] = self._expectation(
                         PhiHTRs[demo_idx], PhiHTHPhiTs[demo_idx])
-
+            #M步：更新promp的权重先验分布和噪声方差
             self._maximization(
                 means, covs, RTRs, PhiHTRs, PhiHTHPhiTs, n_samples)
-
+            #检查收敛
             delta = np.linalg.norm(self.weight_mean - weight_mean_old)
             if verbose:
                 print("Iteration %04d: delta = %g" % (it + 1, delta))
@@ -412,7 +436,7 @@ class ProMP:
 
     def _rbfs_1d_point(self, t, t_max=1.0, overlap=0.7):
         """Radial basis functions for one dimension and a point.
-
+            计算单个时间点的1D RBF激活值
         Parameters
         ----------
         t : float
@@ -430,13 +454,14 @@ class ProMP:
         activations : array, shape (n_weights_per_dim,)
             Activations of RBFs for each time step.
         """
+        #计算RBF带宽（根据重叠率overlap确定）
         h = -1.0 / (8.0 * self.n_weights_per_dim ** 2 * np.log(overlap))
 
-        # normalize time to interval [0, 1]
+        # normalize time to interval [0, 1]#归一化时间到【0，1】
         t = t / t_max
 
         activations = np.exp(-(t - self.centers[:]) ** 2 / (2.0 * h))
-        activations /= activations.sum(axis=0)  # normalize activations for each step
+        activations /= activations.sum(axis=0)  # normalize activations for each step     归一化和为1
 
         assert activations.ndim == 1
         assert activations.shape[0] == self.n_weights_per_dim
@@ -445,7 +470,7 @@ class ProMP:
 
     def _rbfs_nd_sequence(self, T, overlap=0.7):
         """Radial basis functions for n_dims dimensions and a sequence.
-
+        
         Parameters
         ----------
         T : array-like, shape (n_steps,)
@@ -466,7 +491,7 @@ class ProMP:
 
     def _rbfs_1d_sequence(self, T, overlap=0.7, normalize=True):
         """Radial basis functions for one dimension and a sequence.
-
+            计算时间序列的1D RBF激活值(shape: [n_weights_per_dim,n_steps])
         Parameters
         ----------
         T : array-like, shape (n_steps,)
@@ -605,7 +630,7 @@ class ProMP:
 
 def _nd_block_diagonal(partial_1d, n_dims):
     """Replicates matrix n_dims times to form a block-diagonal matrix.
-
+        生成块对角矩阵（将1D RBF激活值扩展到多维度）
     We also accept matrices of rectangular shape. In this case the result is
     not officially called a block-diagonal matrix anymore.
 
@@ -634,7 +659,9 @@ def _nd_block_diagonal(partial_1d, n_dims):
 
 def via_points(promp, ts, y_cond, y_conditional_cov=None):
     """Condition ProMP on several via-points.
-
+    
+        通过多个中间点约束promp（多次调用condition_position)
+        
     For details, see section 2.2 on page 4 of [1]_
 
     Parameters
